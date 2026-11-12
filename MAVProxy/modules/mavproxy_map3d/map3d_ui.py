@@ -104,6 +104,9 @@ class Map3DFrame(wx.Frame):
         self.kml_refresh_due = None
         self.overlay_mesh_revision = -1
         self.fpv_enabled = False
+        self.down_enabled = False
+        self.video = None
+        self.video_config = None
         self.fpv_fov = min(150.0, max(20.0, float(state.fpvfov)))
         # how the mission is drawn, as the element manager's own defaults.
         # The parent pushes what it wants, which may be before there is a
@@ -146,9 +149,13 @@ class Map3DFrame(wx.Frame):
                   self.follow_button)
         controls.Add(self.follow_button, 0, wx.ALL, 4)
         self.fpv_button = wx.ToggleButton(self, -1, "FPV View")
-        self.fpv_button.SetToolTip("Toggle level-horizon first-person view")
+        self.fpv_button.SetToolTip("Body-forward view with full vehicle attitude")
         self.Bind(wx.EVT_TOGGLEBUTTON, self.on_fpv_toggle, self.fpv_button)
         controls.Add(self.fpv_button, 0, wx.ALL, 4)
+        self.down_button = wx.ToggleButton(self, -1, "Down View")
+        self.down_button.SetToolTip("Body-down view, nose at the top of the image")
+        self.Bind(wx.EVT_TOGGLEBUTTON, self.on_down_toggle, self.down_button)
+        controls.Add(self.down_button, 0, wx.ALL, 4)
         self.labels_check = wx.CheckBox(self, -1, "Labels")
         self.labels_check.SetValue(self.mission_labelled)
         self.labels_check.SetToolTip(
@@ -262,9 +269,13 @@ class Map3DFrame(wx.Frame):
             self.elements.set_vehicle_visible(False)
             camera.SetViewAngle(self.fpv_fov)
         self.terrain.update(self.tc)
+        self.start_video()
 
     def on_fpv_toggle(self, event):
         self.set_fpv_enabled(self.fpv_button.GetValue())
+
+    def on_down_toggle(self, event):
+        self.set_fpv_enabled(self.down_button.GetValue(), down=True)
 
     def on_follow_toggle(self, event):
         self.set_follow_enabled(self.follow_button.GetValue(), notify=True)
@@ -348,12 +359,16 @@ class Map3DFrame(wx.Frame):
             self.apply_render_settings(original, notify=False)
         dialog.Destroy()
 
-    def set_fpv_enabled(self, enable):
+    def set_fpv_enabled(self, enable, down=False):
         enable = bool(enable)
-        if enable == self.fpv_enabled:
+        down = bool(enable and down)
+        if enable == self.fpv_enabled and down == self.down_enabled:
             return
+        was_enabled = self.fpv_enabled
         self.fpv_enabled = enable
-        self.fpv_button.SetValue(enable)
+        self.down_enabled = down
+        self.fpv_button.SetValue(enable and not down)
+        self.down_button.SetValue(down)
         self.follow_button.Enable(not enable)
         if self.elements is not None:
             self.elements.set_vehicle_visible(not enable)
@@ -362,9 +377,10 @@ class Map3DFrame(wx.Frame):
 
         camera = self.ren.GetActiveCamera()
         if enable:
-            self.saved_map_view = (list(self.tc.focal), self.tc.dist,
-                                   self.tc.yaw, self.tc.pitch,
-                                   camera.GetViewAngle())
+            if not was_enabled:
+                self.saved_map_view = (list(self.tc.focal), self.tc.dist,
+                                       self.tc.yaw, self.tc.pitch,
+                                       camera.GetViewAngle())
             self.style.interaction_enabled = False
             self.style.cancel_drag()
             camera.SetViewAngle(self.fpv_fov)
@@ -425,8 +441,11 @@ class Map3DFrame(wx.Frame):
             vehicle_enu = self.elements.refresh_vehicle()
         if vehicle_enu is None:
             return
-        (_, _, _, _roll, pitch, yaw) = self.last_vehicle_pose
-        self.tc.set_fpv(vehicle_enu, yaw, pitch)
+        (_, _, _, roll, pitch, yaw) = self.last_vehicle_pose
+        if self.down_enabled:
+            self.tc.set_down(vehicle_enu, roll, pitch, yaw)
+        else:
+            self.tc.set_fpv(vehicle_enu, yaw, pitch, roll=roll)
         self.ren.GetActiveCamera().SetViewAngle(self.fpv_fov)
         self.terrain.update(self.tc)
         self.render()
@@ -439,6 +458,56 @@ class Map3DFrame(wx.Frame):
     def render(self):
         self.widget.GetRenderWindow().Render()
 
+    def set_video(self, config):
+        if config == self.video_config:
+            return
+        self.stop_video()
+        self.video_config = config
+        self.start_video()
+
+    def start_video(self):
+        if self.video_config is None or self.terrain is None:
+            return
+        from MAVProxy.modules.mavproxy_map3d.video import VideoOutput
+        self.video = VideoOutput()
+        try:
+            self.video.open(self.video_config, self.mt,
+                            self.terrain.lat0, self.terrain.lon0,
+                            self.state.zexag)
+        except (RuntimeError, OSError, ValueError) as ex:
+            self.video_error(ex)
+            return
+        self.timer.Start(max(1, int(1000 / self.video_config[3])))
+        self.state.event_queue.put(('video_started', self.video_config[0]))
+
+    def stop_video(self):
+        try:
+            if self.video is not None:
+                self.video.close()
+        except (RuntimeError, OSError) as ex:
+            self.state.event_queue.put(('video_error', str(ex)))
+        finally:
+            self.video = None
+            self.video_config = None
+            self.timer.Start(100)
+
+    def video_error(self, error):
+        try:
+            self.stop_video()
+        finally:
+            self.state.event_queue.put(('video_error', str(error)))
+
+    def send_video(self):
+        if self.video is None or self.last_vehicle_pose is None:
+            return
+        try:
+            self.video.send(
+                self.last_vehicle_pose, self.fpv_fov,
+                (self.terrain_brightness, self.terrain_shading,
+                 self.terrain_wireframe))
+        except (RuntimeError, OSError, ValueError) as ex:
+            self.video_error(ex)
+
     def look_at_latlon(self, lat, lon, amsl, dist=None):
         e = (math.radians(wrap_longitude(lon - self.terrain.lon0)) * R *
              math.cos(math.radians(self.terrain.lat0)))
@@ -450,6 +519,12 @@ class Map3DFrame(wx.Frame):
     # --------------------------------------------------------------- messages
     def handle(self, msg):
         kind = msg[0]
+        if kind == 'view':
+            self.set_fpv_enabled(msg[1] != 'map', down=msg[1] == 'down')
+            return
+        if kind == 'video':
+            self.set_video(msg[1])
+            return
         if kind == 'fpvfov':
             self.set_fpv_fov(msg[1])
             return
@@ -535,7 +610,7 @@ class Map3DFrame(wx.Frame):
             if not self.fpv_enabled:
                 self.look_at_latlon(lat, lon, amsl, dist)
         elif kind == 'center':
-            if self.last_vehicle:
+            if self.last_vehicle and not self.fpv_enabled:
                 self.look_at_latlon(*self.last_vehicle)
 
     def on_timer(self, event):
@@ -578,12 +653,15 @@ class Map3DFrame(wx.Frame):
                 drained = True
         if drained:
             self.render()
+        self.send_video()
         # close request from parent
         if self.state.close_window.acquire(False):
             self.timer.Stop()
             self.Close()
 
     def on_close(self, event):
+        self.stop_video()
+        self.timer.Stop()
         if self.terrain is not None:
             self.terrain.shutdown()
         self.Destroy()

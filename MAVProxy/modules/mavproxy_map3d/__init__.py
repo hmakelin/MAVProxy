@@ -74,6 +74,10 @@ def make_settings():
         mp_settings.MPSetting('traillength', float, TRAIL_LENGTH,
                               range=(0.0, 86400.0)),
         ('trailribbon', bool, False),
+        mp_settings.MPSetting('videowidth', int, 640, range=(16, 3840)),
+        mp_settings.MPSetting('videoheight', int, 480, range=(16, 2160)),
+        mp_settings.MPSetting('videofps', float, 20.0, range=(1.0, 60.0)),
+        mp_settings.MPSetting('videoview', str, 'down', choice=('down', 'fpv')),
         mp_settings.MPSetting('ribbonwidth', float, RIBBON_WIDTH,
                               label='Ribbon width (m)', range=(0.1, 1000.0)),
     ])
@@ -93,6 +97,8 @@ class Map3DModule(mp_module.MPModule):
         self.map3d_settings = make_settings()
         self.add_command('map3d', self.cmd_map3d,
                          "3D map control", ['<start|stop|follow|nofollow|center>',
+                                            'view <map|fpv|down>',
+                                            'video <start|stop>',
                                             'set (MAP3DSETTING)'])
         self.add_completion_function('(MAP3DSETTING)',
                                      self.map3d_settings.completion)
@@ -129,7 +135,7 @@ class Map3DModule(mp_module.MPModule):
     # ------------------------------------------------------------------ command
     def cmd_map3d(self, args):
         if len(args) == 0:
-            print("usage: map3d <start|stop|follow|nofollow|center|set>")
+            print("usage: map3d <start|stop|follow|nofollow|center|view|video|set>")
             return
         cmd = args[0]
         if cmd == "start":
@@ -147,6 +153,15 @@ class Map3DModule(mp_module.MPModule):
         elif cmd == "center":
             if self.map:
                 self.map.center_on_vehicle()
+        elif cmd == "view":
+            if len(args) != 2 or args[1] not in ('map', 'fpv', 'down'):
+                print("usage: map3d view <map|fpv|down>")
+            elif self.map is None or not self.map.is_alive():
+                print("map3d: start the map first")
+            else:
+                self.map.set_view(args[1])
+        elif cmd == "video":
+            self.cmd_video(args[1:])
         elif cmd == "set":
             self.map3d_settings.command(args[1:])
             if (len(args) > 1 and args[1] == 'missionpath' and
@@ -165,6 +180,23 @@ class Map3DModule(mp_module.MPModule):
                 self.send_render_settings()
         else:
             print("unknown map3d command: %s" % cmd)
+
+    def cmd_video(self, args):
+        if (not args or args[0] not in ('start', 'stop') or
+                len(args) > (2 if args[0] == 'start' else 1)):
+            print("usage: map3d video <start [device]|stop>")
+            return
+        if self.map is None or not self.map.is_alive():
+            print("map3d: start the map first")
+            return
+        if args[0] == 'stop':
+            self.map.set_video(None)
+            return
+        settings = self.map3d_settings
+        self.map.set_video((
+            args[1] if len(args) == 2 else '/dev/video10',
+            settings.videowidth, settings.videoheight, settings.videofps,
+            settings.videoview))
 
     def start_map(self):
         if self.map is not None and self.map.is_alive():
@@ -836,6 +868,10 @@ class Map3DModule(mp_module.MPModule):
         for event in self.map.check_events():
             if event[0] == 'startup_error':
                 print("map3d: the 3D view failed to start:\n%s" % event[1])
+            elif event[0] == 'video_error':
+                print("map3d video failed: %s" % event[1])
+            elif event[0] == 'video_started':
+                print("map3d video started: %s" % event[1])
             # what the view's own controls were set to.  Each is sent back
             # as the setting now stands: a command given here while the
             # event was on its way has already been sent to the view, and

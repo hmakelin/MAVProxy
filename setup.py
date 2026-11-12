@@ -141,6 +141,7 @@ on how to use MAVProxy.''',
         # without the platform marker: someone naming it explicitly wants a
         # loud failure rather than a silently dormant module
         'map3d': map3d_requirements,
+        'map3d-video': map3d_requirements + ['pyvirtualcam>=0.11'],
         # restserver module
         'server': ['flask'],
         'recommended': ['flask', 'PyYAML', 'lxml', 'wxpython',

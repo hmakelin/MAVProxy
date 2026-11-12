@@ -1,6 +1,7 @@
 '''shared test setup'''
 
 import os
+from unittest.mock import Mock
 
 import pytest
 
@@ -49,6 +50,8 @@ class Terrain(object):
     tiles = []
 
     def __init__(self, *args, **kwargs):
+        self.lat0 = args[2] if len(args) > 2 else 0.0
+        self.lon0 = args[3] if len(args) > 3 else 0.0
         self.render_settings = (kwargs.get('brightness'),
                                 kwargs.get('shading'),
                                 kwargs.get('wireframe'))
@@ -100,12 +103,18 @@ def map3d_frame(monkeypatch):
         frame.elements = elements
         frame.ren = vtk.vtkRenderer()
         frame.widget = SimpleNamespace(SetInteractorStyle=lambda style: None)
+        frame.timer = Mock()
         frame.status_actor = SimpleNamespace(SetInput=lambda text: None)
         frame.GetClientSize = lambda: (1100, 800)
         frame.render = lambda: None
         frame.tc = None
         frame.follow = False
         frame.fpv_enabled = False
+        frame.down_enabled = False
+        frame.video = None
+        frame.video_config = None
+        frame.last_vehicle = None
+        frame.last_vehicle_pose = None
         frame.fpv_fov = 90.0
         frame.terrain_brightness = 1.25
         frame.terrain_shading = True
@@ -125,6 +134,8 @@ def map3d_frame(monkeypatch):
         frame.labels_check = Widget(frame.mission_labelled)
         frame.style_choice = Widget(frame.mission_style)
         frame.follow_button = Widget(frame.follow)
+        frame.fpv_button = Widget(False)
+        frame.down_button = Widget(False)
         return frame
     return build
 

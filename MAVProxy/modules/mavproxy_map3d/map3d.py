@@ -184,6 +184,16 @@ class Map3D:
     def set_fpv_fov(self, fov):
         self._put(('fpvfov', float(fov)))
 
+    def set_view(self, view):
+        '''map, fpv (body-forward), or down (body-down).'''
+        if view not in ('map', 'fpv', 'down'):
+            raise ValueError("unknown map3d view: %s" % view)
+        self._put(('view', view))
+
+    def set_video(self, config):
+        '''None to stop, or (device, width, height, fps, view) to start.'''
+        self._put(('video', config))
+
     def set_trail_length(self, seconds):
         '''seconds of vehicle trail to draw, 0 for all of it'''
         self._put(('trail_length', float(seconds)))

@@ -1,7 +1,7 @@
 '''
 Cesium-like camera and interactor for the 3D map.
 
-The camera keeps the horizon level at all times (no roll/flip): only yaw (about
+The map camera keeps the horizon level (no roll/flip): only yaw (about
 world up) and pitch (look-down angle, clamped). Default mouse drag pans; Ctrl+drag
 or a right drag rotates (left-right = yaw, forward-back = pitch); wheel or +/-
 keys zoom.
@@ -63,17 +63,24 @@ class TerrainCamera:
             self.pitch = pitch
         self.apply()
 
-    def set_fpv(self, position, yaw, pitch, lookahead=5000.0):
-        '''Place the camera at the vehicle and look along its yaw/pitch.
+    def set_fpv(self, position, yaw, pitch, lookahead=5000.0, roll=0.0):
+        '''Body-forward camera; MAVLink attitude angles are in radians.'''
+        self._set_body_view(position, roll, pitch, yaw, False, lookahead)
 
-        yaw and pitch are radians from MAVLink. Roll is deliberately omitted;
-        world-up remains camera-up so the FPV horizon is always level.
-        '''
-        pitch = min(math.radians(85.0), max(math.radians(-85.0), pitch))
-        cp = math.cos(pitch)
-        direction = (math.sin(yaw) * cp,
-                     math.cos(yaw) * cp,
-                     math.sin(pitch))
+    def set_down(self, position, roll, pitch, yaw, lookahead=5000.0):
+        '''Body-down camera, with the nose at the top of the image.'''
+        self._set_body_view(position, roll, pitch, yaw, True, lookahead)
+
+    def _set_body_view(self, position, roll, pitch, yaw, down, lookahead):
+        sr, cr = math.sin(roll), math.cos(roll)
+        sp, cp = math.sin(pitch), math.cos(pitch)
+        sy, cy = math.sin(yaw), math.cos(yaw)
+        # Body FRD -> NED (Rz(yaw) Ry(pitch) Rx(roll)) -> scene ENU.
+        forward = (sy * cp, cy * cp, sp)
+        body_down = (sy * sp * cr - cy * sr,
+                     cy * sp * cr + sy * sr, -cp * cr)
+        direction = body_down if down else forward
+        up = forward if down else tuple(-v for v in body_down)
         self.pos = tuple(position)
         self.focal = [position[i] + lookahead * direction[i] for i in range(3)]
         self.dist = lookahead
@@ -81,7 +88,7 @@ class TerrainCamera:
         self.pitch = math.degrees(pitch)
         self.cam.SetPosition(*self.pos)
         self.cam.SetFocalPoint(*self.focal)
-        self.cam.SetViewUp(0, 0, 1)
+        self.cam.SetViewUp(*up)
         self.cam.SetClippingRange(0.5, lookahead * 100.0)
 
 
