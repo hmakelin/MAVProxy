@@ -4,7 +4,10 @@ Parent-side handle for the 3D map. Spawns the VTK/wx viewer in a child process
 '''
 
 import collections
+import hashlib
 import importlib.util
+import os
+import string
 import time
 import queue
 import traceback
@@ -43,6 +46,46 @@ MISSION_LABEL_SIZE = 14
 MISSION_LABEL_SIZES = (6, 48)
 
 PACKAGES = ('vtk', 'quantized_mesh_tile')
+CUSTOM_TILE_SERVICE = 'Custom'
+CUSTOM_TILE_URL_ENV = 'MAVPROXY_MAP3D_TILE_URL'
+_TILE_TEMPLATE_VALUES = {
+    'X': 0,
+    'Y': 0,
+    'Z': 0,
+    'ZOOM': 0,
+    'QUAD': '',
+    'OAM_ZOOM': 0,
+    'GOOG_DIGIT': 0,
+    'MS_DIGITBR': 0,
+    'MS_DIGIT': 0,
+    'Y_DIGIT': 0,
+    'GALILEO': '',
+    'ENI_Y': 0,
+    'TD_DIGIT': 0,
+    'TIANDITU_KEY': '',
+}
+
+
+def resolve_tile_service(service, environ=None):
+    '''Resolve the map3d-only custom service without putting its URL, which may
+    contain a credential, in a cache path.'''
+    if service != CUSTOM_TILE_SERVICE:
+        return (service, None)
+    if environ is None:
+        environ = os.environ
+    url = environ.get(CUSTOM_TILE_URL_ENV, '').strip()
+    if not url:
+        raise ValueError(
+            "%s must be set when service is %s" %
+            (CUSTOM_TILE_URL_ENV, CUSTOM_TILE_SERVICE))
+    try:
+        string.Template(url).substitute(_TILE_TEMPLATE_VALUES)
+    except (KeyError, ValueError) as ex:
+        raise ValueError(
+            "%s is not a valid tile URL template: %s" %
+            (CUSTOM_TILE_URL_ENV, ex))
+    digest = hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
+    return ('Map3DCustom-%s' % digest, url)
 
 
 def missing_packages():
@@ -70,9 +113,13 @@ class Map3D:
     def __init__(self, title="3D Map", service="MicrosoftSat", zexag=1.0,
                  width=1100, height=800, debug=False, fpvfov=90.0,
                  terrain_brightness=1.25, terrain_shading=True,
-                 terrain_wireframe=False, follow=True):
+                 terrain_wireframe=False, follow=True, tile_url=None,
+                 terrain_zoom=12, imagery_max_zoom=19):
         self.title = title
         self.service = service
+        self.tile_url = tile_url
+        self.terrain_zoom = terrain_zoom
+        self.imagery_max_zoom = imagery_max_zoom
         self.zexag = zexag
         self.width = width
         self.height = height

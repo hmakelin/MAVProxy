@@ -2,9 +2,9 @@
 Async terrain manager for the 3D map.
 
 Fetches ArduPilot quantized-mesh terrain tiles, decodes them, and drapes
-satellite imagery (via mp_tile) over them with view-dependent texture LOD.
-Network + decode + imagery happen on a background worker thread; VTK object
-creation happens on the main GUI thread (drained via process()).
+satellite imagery (via mp_tile) over locally subdivided, view-dependent patches.
+Network + decode + imagery happen on background worker threads; VTK objects
+and mesh clipping stay on the GUI thread.
 '''
 
 import math
@@ -34,6 +34,7 @@ CACHE_DIR = os.path.join(mp_tile.default_cache_path(), "quantized")
 # the fetches are latency bound rather than bandwidth bound, so run them in
 # parallel. One at a time takes minutes on a high latency link such as WSL2.
 TILE_DOWNLOAD_THREADS = 8
+MAX_TEXTURE_SIZE = 1024
 
 # ArduPilot tiles include the optional lighting extension. This decoder warns
 # when it skips that extension, but map3d computes its own VTK normals anyway.
@@ -184,6 +185,128 @@ def lod_tile_set(g, z_fine, fx0, fx1, fy0, fy1, z_min, ring):
     return out
 
 
+class TexturePatch:
+    '''A locally clipped mesh with its own bounded imagery texture.'''
+    def __init__(self, geo, bbox, lat0, lon0, prop, path=(), texture=None):
+        self.geo = geo
+        self.bbox = bbox
+        self.lat0 = lat0
+        self.lon0 = lon0
+        self.path = path
+        self.token = object()
+        self.children = None
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(geo)
+        self.actor = vtk.vtkActor()
+        self.actor.SetMapper(mapper)
+        self.actor.SetProperty(prop)
+        self.actor.SetTexture(texture)
+        self.tex_key = None
+        self.want_key = None
+
+    def camera_distance(self, campos):
+        bounds = self.geo.GetBounds()
+        return math.sqrt(sum(
+            max(bounds[2 * i] - campos[i], 0.0,
+                campos[i] - bounds[2 * i + 1]) ** 2 for i in range(3)))
+
+    def texture_spec(self, campos, screen_h, mt, fov_deg):
+        W, S, E, N = self.bbox
+        dist = self.camera_distance(campos)
+        metres_per_radian = R * math.cos(math.radians(N))
+        native_gsd = 2 * math.pi * metres_per_radian / (256 * 2 ** mt.max_zoom)
+        gsd = max(0.3, native_gsd,
+                  dist * 2.0 * math.tan(math.radians(fov_deg) / 2.0) / screen_h)
+        width = math.radians(E - W) * metres_per_radian
+        aspect = ((mp_tile.mercator_y(N) - mp_tile.mercator_y(S)) /
+                  math.radians(E - W))
+        pixels = width / gsd
+        if max(pixels, pixels * aspect, aspect) > MAX_TEXTURE_SIZE:
+            return None
+        # Quantized sizes avoid redraping on every small camera movement.
+        tex_w = 2 ** int(math.ceil(math.log2(max(256, pixels))))
+        tex_w = min(tex_w, MAX_TEXTURE_SIZE,
+                    max(1, int(MAX_TEXTURE_SIZE / aspect)))
+        img_zoom = int(math.ceil(math.log2(
+            2 * math.pi * metres_per_radian * tex_w / (256 * width))))
+        img_zoom = max(mt.min_zoom, min(mt.max_zoom, img_zoom))
+        return (img_zoom, tex_w), (W, S, E, N, img_zoom, tex_w)
+
+    def split(self):
+        W, S, E, N = self.bbox
+        dlon = math.radians(E - W)
+        dmy = mp_tile.mercator_y(N) - mp_tile.mercator_y(S)
+        if dmy > dlon:
+            lat = mp_tile.mercator_lat(
+                0.5 * (mp_tile.mercator_y(S) + mp_tile.mercator_y(N)))
+            _, n, _ = enu(lat, W, 0.0, self.lat0, self.lon0)
+            origin, normal = (0, n, 0), (0, 1, 0)
+            boxes = ((W, S, E, lat), (W, lat, E, N))
+        else:
+            lon = 0.5 * (W + E)
+            e, _, _ = enu(S, lon, 0.0, self.lat0, self.lon0)
+            origin, normal = (e, 0, 0), (1, 0, 0)
+            boxes = ((W, S, lon, N), (lon, S, E, N))
+        children = []
+        for index, bbox in enumerate(boxes):
+            geo = self.clip(self.geo, origin, normal, index == 0)
+            if geo.GetNumberOfCells():
+                children.append(TexturePatch(
+                    geo, bbox, self.lat0, self.lon0,
+                    self.actor.GetProperty(), self.path + (index,),
+                    self.actor.GetTexture()))
+        if not children:
+            raise RuntimeError("terrain texture subdivision produced no geometry")
+        self.children = children
+
+    @staticmethod
+    def clip(geo, origin, normal, inside_out):
+        plane = vtk.vtkPlane()
+        plane.SetOrigin(*origin)
+        plane.SetNormal(*normal)
+        clip = vtk.vtkClipPolyData()
+        clip.SetInputData(geo)
+        clip.SetClipFunction(plane)
+        clip.SetInsideOut(inside_out)
+        clip.SetOutputPointsPrecision(vtk.vtkAlgorithm.DOUBLE_PRECISION)
+        clip.Update()
+        return clip.GetOutput()
+
+    def leaves(self, campos, screen_h, mt, fov_deg):
+        spec = self.texture_spec(campos, screen_h, mt, fov_deg)
+        if spec is not None:
+            self.children = None
+            yield self, spec
+        else:
+            if self.children is None:
+                self.split()
+            for child in self.children:
+                yield from child.leaves(campos, screen_h, mt, fov_deg)
+
+    def invalidate_texture(self):
+        self.tex_key = None
+        if self.children is not None:
+            for child in self.children:
+                child.invalidate_texture()
+
+    def apply_texture(self, img, vw, vs, ve, vn, tex_w, key):
+        points = numpy_support.vtk_to_numpy(self.geo.GetPoints().GetData())
+        west, _, _ = enu(vs, vw, 0.0, self.lat0, self.lon0)
+        width = math.radians(ve - vw) * R * math.cos(math.radians(self.lat0))
+        lat = self.lat0 + np.degrees(points[:, 1] / R)
+        lat = np.clip(lat, -89.9999, 89.9999)
+        my = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2))
+        coords = np.column_stack((
+            (points[:, 0] - west) / width,
+            1.0 - (mp_tile.mercator_y(vn) - my) * tex_w /
+            (math.radians(ve - vw) * img.shape[0])))
+        tcoords = numpy_support.numpy_to_vtk(
+            np.ascontiguousarray(np.clip(coords, 0.0, 1.0)), deep=1)
+        self.geo.GetPointData().SetTCoords(tcoords)
+        self.actor.SetTexture(np_rgb_to_texture(img))
+        self.tex_key = key
+
+
 class Tile:
     '''one terrain tile (main-thread VTK objects + view-dependent drape)'''
     def __init__(self, decoded, lat0, lon0, zexag, z_offset,
@@ -195,6 +318,7 @@ class Tile:
         nv = len(self.verts)
 
         pts = vtk.vtkPoints()
+        pts.SetDataTypeToDouble()
         pts.SetNumberOfPoints(nv)
         for i in range(nv):
             lon, lat, h = self.verts[i]
@@ -220,20 +344,15 @@ class Tile:
         bounds = self.geo.GetBounds()
         self.z_min = bounds[4]
         self.z_max = bounds[5]
-        self.tcoords = vtk.vtkFloatArray()
-        self.tcoords.SetNumberOfComponents(2)
-        self.tcoords.SetNumberOfTuples(nv)
-        self.geo.GetPointData().SetTCoords(self.tcoords)
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputData(self.geo)
-        self.actor = vtk.vtkActor()
-        self.actor.SetMapper(mapper)
+        self.property = vtk.vtkProperty()
+        self.actor = vtk.vtkAssembly()
+        self.root = TexturePatch(self.geo, self.bbox, lat0, lon0, self.property)
+        self.patches = {(): self.root}
+        self.actor.AddPart(self.root.actor)
         self.apply_render_settings(brightness, shading, wireframe)
-        self.tex_key = None     # currently applied drape key
-        self.want_key = None    # most recently requested drape key
 
     def apply_render_settings(self, brightness, shading, wireframe):
-        prop = self.actor.GetProperty()
+        prop = self.property
         brightness = min(2.0, max(0.25, float(brightness)))
         prop.SetAmbient(min(1.0, 0.35 * brightness))
         prop.SetDiffuse(min(1.0, 0.8 * brightness))
@@ -265,44 +384,23 @@ class Tile:
         return max(intersections.GetPoint(i)[2]
                    for i in range(intersections.GetNumberOfPoints()))
 
-    def texture_request(self, campos, screen_h, mt, fov_deg=30.0):
-        '''Compute the desired full-tile drape (cheap, main thread).
-
-        A texture must cover the complete mesh tile. Applying imagery for only
-        the camera-visible subsection makes VTK clamp the texture coordinates
-        of the remaining vertices to an edge pixel, producing long stretched
-        streaks in low-angle and FPV views.
-        '''
-        W, S, E, N = self.bbox
-        mid = 0.5 * (N + S)
-        dist = math.sqrt(sum((campos[i] - self.center[i]) ** 2 for i in range(3)))
-        gsd = max(0.3, dist * 2.0 * math.tan(math.radians(fov_deg) / 2.0) / screen_h)
-        img_zoom = int(round(math.log2(
-            2 * math.pi * R * math.cos(math.radians(mid)) / (gsd * 256))))
-        img_zoom = max(mt.min_zoom, min(mt.max_zoom, img_zoom))
-        tile_w_m = math.radians(E - W) * R * math.cos(math.radians(mid))
-        tex_w = min(1024, max(256, int(tile_w_m / gsd)))
-        key = (img_zoom, tex_w)
-        if key == self.tex_key:
-            return None
-        return key, (W, S, E, N, img_zoom, tex_w)
-
-    def apply_texture(self, img, vw, vs, ve, vn, tex_w, key):
-        '''main thread: attach the draped image and recompute UVs'''
-        dlon = math.radians(ve - vw)
-        C = tex_w / dlon
-        tex_h = img.shape[0]
-        myn = mp_tile.mercator_y(vn)
-        for i in range(len(self.verts)):
-            lon, lat, _ = self.verts[i]
-            x = C * math.radians(lon - vw)
-            y = C * (myn - mp_tile.mercator_y(lat))
-            u = min(1.0, max(0.0, x / tex_w))
-            v = min(1.0, max(0.0, 1.0 - y / tex_h))
-            self.tcoords.SetTuple2(i, u, v)
-        self.tcoords.Modified()
-        self.actor.SetTexture(np_rgb_to_texture(img))
-        self.tex_key = key
+    def texture_requests(self, campos, screen_h, mt, fov_deg=30.0):
+        '''Refine imagery locally, without fetching finer terrain meshes.'''
+        leaves = list(self.root.leaves(campos, screen_h, mt, fov_deg))
+        patches = {patch.path: patch for patch, _ in leaves}
+        changed = patches != self.patches
+        if changed:
+            for path, patch in self.patches.items():
+                if patches.get(path) is not patch:
+                    self.actor.RemovePart(patch.actor)
+            for path, patch in patches.items():
+                if self.patches.get(path) is not patch:
+                    self.actor.AddPart(patch.actor)
+            self.patches = patches
+        requests = [(patch, key, params)
+                    for patch, (key, params) in leaves if key != patch.tex_key]
+        requests.sort(key=lambda req: req[0].camera_distance(campos))
+        return changed, requests
 
 
 def build_texture_image(mt, lock, vw, vs, ve, vn, img_zoom, tex_w, priority=0.0):
@@ -348,6 +446,7 @@ class TerrainManager:
         self.tex_lock = threading.Lock()
         self.download_revision = mt.download_revision()
         self.redrape_pending = False
+        self.render_changed = False
         self.last_tc = None
         self.stop = False
         self.workers = [threading.Thread(target=self._worker, daemon=True)
@@ -374,7 +473,7 @@ class TerrainManager:
                     (z, x, y) = payload
                     self.results.put(("decode", jid, decode_terrain(z, x, y)))
                 elif kind == "texture":
-                    (_tilekey, _tkey, params, priority) = payload
+                    (_tilekey, _path, _token, _tkey, params, priority) = payload
                     (vw, vs, ve, vn, img_zoom, tex_w) = params
                     img = build_texture_image(self.mt, self.tex_lock,
                                               vw, vs, ve, vn, img_zoom, tex_w,
@@ -450,23 +549,26 @@ class TerrainManager:
                 removed_tile = True
         if removed_tile:
             self.mesh_revision += 1
-        # request textures for present tiles (at most one outstanding per tile),
+        # request textures for present patches (one outstanding per patch),
         # nearest the camera first. The rank goes down to mp_tile so the imagery
         # queue is ordered too: several workers fetch tiles concurrently, so the
         # order jobs are queued in does not by itself decide the download order
         fov_deg = tc.cam.GetViewAngle()
         for rank, key in enumerate(sorted(self.tiles.keys(), key=tile_priority)):
             tile = self.tiles[key]
-            req = tile.texture_request(tc.pos, self.screen_h, self.mt, fov_deg)
-            if req is None:
-                continue
-            tkey, params = req
-            jid = ("T", key)
-            if jid in self.inflight:
-                continue
-            tile.want_key = tkey
-            self.inflight.add(jid)
-            self.jobs.put(("texture", jid, (key, tkey, params, rank)))
+            changed, requests = tile.texture_requests(
+                tc.pos, self.screen_h, self.mt, fov_deg)
+            self.render_changed |= changed
+            for index, (patch, tkey, params) in enumerate(requests):
+                jid = ("T", key, patch.path)
+                if jid in self.inflight:
+                    continue
+                patch.want_key = tkey
+                self.inflight.add(jid)
+                priority = rank + index / (len(requests) + 1.0)
+                # Keep VTK objects on the GUI thread, including retired patches.
+                self.jobs.put(("texture", jid, (
+                    key, patch.path, patch.token, tkey, params, priority)))
 
     def process(self, tc, budget=None):
         '''main thread: drain worker results, build/update VTK. Returns True if
@@ -474,7 +576,8 @@ class TerrainManager:
         draining early so the main thread stays free while the camera moves'''
         start = time.monotonic()
         self.last_tc = tc
-        changed = False
+        changed = self.render_changed
+        self.render_changed = False
         revision = self.mt.download_revision()
         if revision != self.download_revision:
             self.download_revision = revision
@@ -496,19 +599,25 @@ class TerrainManager:
                 try:
                     tile = Tile(payload, self.lat0, self.lon0, self.zexag, zoff,
                                 self.brightness, self.shading, self.wireframe)
-                except Exception:
+                except Exception as ex:
+                    print("map3d: failed to build terrain tile %s: %s" %
+                          ((z, x, y), ex))
                     continue
                 self.tiles[(z, x, y)] = tile
                 self.ren.AddActor(tile.actor)
                 self.mesh_revision += 1
                 changed = True
             elif kind == "texture":
-                img, (tilekey, tkey, params, _priority) = payload
+                img, (tilekey, path, token, tkey, params, _priority) = payload
                 (vw, vs, ve, vn, img_zoom, tex_w) = params
                 tile = self.tiles.get(tilekey)
-                if tile is not None and tkey == tile.want_key:
-                    tile.apply_texture(img, vw, vs, ve, vn, tex_w, tkey)
+                patch = tile.patches.get(path) if tile is not None else None
+                if (patch is not None and patch.token is token and
+                        tkey == patch.want_key):
+                    patch.apply_texture(img, vw, vs, ve, vn, tex_w, tkey)
                     changed = True
+            elif kind == "error":
+                print("map3d: terrain job %s failed: %s" % (jid, payload))
         # Do not let an old placeholder result restore tex_key after it is
         # invalidated. Wait for every old texture job, then request fresh ones.
         texture_inflight = any(jid[0] == "T" for jid in self.inflight)
@@ -516,7 +625,7 @@ class TerrainManager:
                 not texture_inflight and tc is not None):
             self.redrape_pending = False
             for tile in self.tiles.values():
-                tile.tex_key = None
+                tile.root.invalidate_texture()
             self.update(tc)
         # after building new tiles, request their textures next update
         if changed and tc is not None:

@@ -22,7 +22,7 @@ from MAVProxy.modules.mavproxy_misseditor import get_mission_for_map
 from MAVProxy.modules.mavproxy_map3d.map3d import (
     Map3D, MissionItem, MISSION_LABEL_SIZE, MISSION_LABEL_SIZES,
     MISSION_STYLES, TRAIL_LENGTH, RIBBON_WIDTH, missing_packages,
-    missing_packages_message)
+    missing_packages_message, resolve_tile_service)
 
 # fence colours as the 2D map's PolyFence layer uses them (OpenCV BGR)
 FENCE_INCLUSION_BGR = (0, 255, 0)
@@ -58,6 +58,8 @@ def make_settings():
         ('service', str, 'MicrosoftSat'),
         ('zexag', float, 1.0),
         ('debug', bool, False),
+        mp_settings.MPSetting('terrainzoom', int, 12, range=(8, 16)),
+        mp_settings.MPSetting('imagerymaxzoom', int, 19, range=(1, 24)),
         mp_settings.MPSetting('fpvfov', float, 90.0, range=(20.0, 150.0)),
         mp_settings.MPSetting('terrainbrightness', float, 1.25,
                               range=(0.25, 2.0)),
@@ -206,15 +208,24 @@ class Map3DModule(mp_module.MPModule):
         if missing:
             print(missing_packages_message(missing))
             return
+        try:
+            service, tile_url = resolve_tile_service(
+                self.map3d_settings.service)
+        except ValueError as ex:
+            print("map3d: %s" % ex)
+            return
         self.map = Map3D(title="MAVProxy 3D Map",
-                         service=self.map3d_settings.service,
+                         service=service,
                          zexag=self.map3d_settings.zexag,
                          debug=self.map3d_settings.debug,
                          fpvfov=self.map3d_settings.fpvfov,
                          terrain_brightness=self.map3d_settings.terrainbrightness,
                          terrain_shading=self.map3d_settings.terrainshading,
                          terrain_wireframe=self.map3d_settings.terrainwireframe,
-                         follow=self.follow)
+                         follow=self.follow,
+                         tile_url=tile_url,
+                         terrain_zoom=self.map3d_settings.terrainzoom,
+                         imagery_max_zoom=self.map3d_settings.imagerymaxzoom)
         # push whatever we already know
         self.map.set_mission_arrows(self.map3d_settings.showdirection)
         self.map.set_mission_labels(self.map3d_settings.showlabels)

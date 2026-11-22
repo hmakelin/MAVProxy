@@ -18,6 +18,54 @@ Returning to the map restores its previous camera and field of view.
 `map3d set fpvfov 90` sets the vertical field of view of both mounted views
 and video output.
 
+## Custom imagery tiles
+
+Map3d can use a custom XYZ/Web Mercator imagery source. Set the tile URL in the
+environment before starting MAVProxy. The URL uses the same `string.Template`
+variables as the built-in tile services; `${ZOOM}`, `${X}`, and `${Y}` are the
+usual XYZ variables.
+
+```
+export MAVPROXY_MAP3D_TILE_URL='https://tiles.example.com/${ZOOM}/${X}/${Y}.png?key=...'
+```
+
+Select the custom service and restart the map so the imagery source is applied:
+
+```
+map3d stop
+map3d set service Custom
+map3d set terrainzoom 12
+map3d set imagerymaxzoom 22
+map3d start
+```
+
+The URL is read only when `Custom` is selected. Each distinct URL uses a
+separate hashed cache namespace, and the URL itself is not included in the
+cache path. The endpoint must return image tiles; authorization can be included
+in the URL query string. `imagerymaxzoom` is the highest zoom map3d may request
+from the imagery source, not a forced zoom level. The source must actually
+provide useful imagery at that zoom.
+
+## Imagery detail
+
+Terrain meshes and imagery resolution are independent. Map3d automatically
+clips existing terrain into smaller textured patches near the camera, then
+merges the patches when zooming out. Each texture is at most 1024 pixels in
+either dimension. All patches cover their complete piece of terrain, including
+in FPV and Down View, without stretching a small image across a large mesh.
+This also applies to virtual video output.
+
+No new terrain server or higher-resolution terrain downloads are needed.
+`terrainzoom` controls the downloaded mesh tiles; keep it at the default 12
+for the ArduPilot terrain server, which advertises a maximum zoom of 12.
+Raising it to 14 or 16 is not a way to increase imagery detail and can request
+missing terrain tiles. `imagerymaxzoom` and `terrainzoom` take effect when
+the map is started.
+
+Detail remains limited by the imagery source and camera distance. Closer views
+can use more textures and imagery downloads; loading is asynchronous, so
+existing textures remain visible while finer imagery arrives.
+
 ## Linux v4l2loopback output
 
 Install the optional Python dependency into the Python environment running

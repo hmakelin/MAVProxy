@@ -17,7 +17,8 @@ import vtk
 from pymavlink import mavutil
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.mavproxy_map import mp_tile
-from MAVProxy.modules.mavproxy_map3d.map3d import MissionItem
+from MAVProxy.modules.mavproxy_map3d.map3d import (
+    MissionItem, resolve_tile_service)
 from MAVProxy.modules.mavproxy_map3d.terrain import (
     TerrainManager, R, TILE_DOWNLOAD_THREADS)
 from MAVProxy.modules.mavproxy_map3d.elements import ElementManager
@@ -49,6 +50,8 @@ def main():
     ap.add_argument("--log", default="example_logs/V95_56.bin")
     ap.add_argument("--service", default="MicrosoftSat")
     ap.add_argument("--zexag", type=float, default=1.0)
+    ap.add_argument("--terrain-zoom", type=int, default=12)
+    ap.add_argument("--imagery-max-zoom", type=int, default=19)
     ap.add_argument("--pitch", type=float, default=28.0)
     ap.add_argument("--width", type=int, default=1100)
     ap.add_argument("--height", type=int, default=800)
@@ -56,6 +59,9 @@ def main():
     ap.add_argument("--out", default="/tmp/map3d_module.png")
     ap.add_argument("--gui", action="store_true")
     args = ap.parse_args()
+    args.service, tile_url = resolve_tile_service(args.service)
+    if tile_url is not None:
+        mp_tile.TILE_SERVICES[args.service] = tile_url
 
     pts, mission = load_log(args.log)
     if not pts:
@@ -75,7 +81,9 @@ def main():
     if args.gui:
         from MAVProxy.modules.mavproxy_map3d.map3d import Map3D
         m = Map3D(title="map3d test", service=args.service, zexag=args.zexag,
-                  width=args.width, height=args.height)
+                  width=args.width, height=args.height, tile_url=tile_url,
+                  terrain_zoom=args.terrain_zoom,
+                  imagery_max_zoom=args.imagery_max_zoom)
         time.sleep(1.0)
         m.set_origin(lat0, lon0, ground0)
         m.set_home(ground0)
@@ -93,9 +101,11 @@ def main():
     ren = vtk.vtkRenderer()
     ren.SetBackground(0.45, 0.62, 0.85)
     mt = mp_tile.MPTile(service=args.service, tile_delay=0.02,
+                        max_zoom=args.imagery_max_zoom,
                         download_threads=TILE_DOWNLOAD_THREADS)
     terrain = TerrainManager(ren, mt, lat0, lon0, zexag=args.zexag,
-                             fine_radius=3, screen_h=args.height)
+                             zoom_fine=args.terrain_zoom, fine_radius=3,
+                             screen_h=args.height)
     elements = ElementManager(ren, lat0, lon0, args.zexag)
     elements.set_home(ground0)
     elements.set_path(pts)

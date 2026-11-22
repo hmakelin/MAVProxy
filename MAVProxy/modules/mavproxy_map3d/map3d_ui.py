@@ -230,10 +230,18 @@ class Map3DFrame(wx.Frame):
     # ----------------------------------------------------------------- scene
     def init_scene(self, lat0, lon0, amsl_ref):
         self.status_actor.SetInput("Loading terrain...")
+        tile_url = getattr(self.state, 'tile_url', None)
+        if tile_url is not None:
+            mp_tile.TILE_SERVICES[self.state.service] = tile_url
+            mp_tile.SERVICE_MIN_ZOOM[self.state.service] = 0
         self.mt = mp_tile.MPTile(service=self.state.service, tile_delay=0.02,
+                                 max_zoom=getattr(
+                                     self.state, 'imagery_max_zoom', 19),
                                  download_threads=TILE_DOWNLOAD_THREADS)
         self.terrain = TerrainManager(self.ren, self.mt, lat0, lon0,
                                       zexag=self.state.zexag,
+                                      zoom_fine=getattr(
+                                          self.state, 'terrain_zoom', 12),
                                       screen_h=self.GetClientSize()[1] or self.state.height,
                                       brightness=self.terrain_brightness,
                                       shading=self.terrain_shading,
