@@ -119,7 +119,7 @@ def test_video_waits_for_scene_and_closes_on_stop(map3d_frame, monkeypatch):
     frame.last_vehicle_pose = (*HOME, 0.1, 0.2, 0.3)
     frame.send_video()
     output.send.assert_called_once_with(
-        frame.last_vehicle_pose, 90.0, (1.25, True, False))
+        frame.last_vehicle_pose, 90.0, (1.25, True, False), (0.0, 0.0, 0.0))
     frame.handle(('video', None))
     output.close.assert_called_once()
     assert frame.video is None
@@ -178,6 +178,171 @@ def test_video_commands_and_view_reach_child(map3d_frame, map3d_module):
         frame.handle(message)
         assert frame.fpv_enabled == (view != 'map')
         assert frame.down_enabled == (view == 'down')
+
+
+def test_mount_setting_reaches_view_and_video(map3d_frame, map3d_module, capsys):
+    viewer = Map3D.__new__(Map3D)
+    viewer.child = SimpleNamespace(is_alive=lambda: True)
+    viewer.object_queue = queue.Queue()
+    module = map3d_module(viewer)
+    frame = map3d_frame()
+    module.cmd_map3d(['set', 'mountyaw', '90'])
+    messages = []
+    while not viewer.object_queue.empty():
+        messages.append(viewer.object_queue.get_nowait())
+    mount_message = next(m for m in messages if m[0] == 'camera_mount')
+    assert mount_message == ('camera_mount', 0.0, 0.0, 90.0)
+    frame.handle(mount_message)
+    frame.video = Mock()
+    frame.last_vehicle_pose = (*HOME, 0, 0, 0)
+    frame.send_video()
+    frame.video.send.assert_called_once_with(
+        frame.last_vehicle_pose, 90.0, (1.25, True, False),
+        pytest.approx((0, 0, math.pi / 2)))
+    for bad in ('nan', 'inf', '181', 'not-a-number'):
+        module.cmd_map3d(['set', 'mountyaw', bad])
+        assert module.map3d_settings.mountyaw == 90
+    assert capsys.readouterr().out
+
+
+@pytest.mark.parametrize('width,height,hfov', [
+    (640, 480, 90), (1920, 1080, 120), (480, 640, 60),
+])
+def test_horizontal_video_fov_uses_active_video_aspect(
+        map3d_frame, width, height, hfov):
+    frame = map3d_frame()
+    frame.video = Mock()
+    frame.video_config = ('/dev/video10', width, height, 20, 'down')
+    frame.last_vehicle_pose = (*HOME, 0, 0, 0)
+    frame.handle(('video_fov', hfov, 'horizontal'))
+    frame.send_video()
+    vfov = frame.video.send.call_args.args[1]
+    assert math.tan(math.radians(vfov) / 2) * width / height == pytest.approx(
+        math.tan(math.radians(hfov) / 2))
+    assert height / (2 * math.tan(math.radians(vfov) / 2)) == pytest.approx(
+        width / (2 * math.tan(math.radians(hfov) / 2)))
+
+
+def test_video_fov_settings_live_and_default(map3d_frame, map3d_module, capsys):
+    viewer = Map3D.__new__(Map3D)
+    viewer.child = SimpleNamespace(is_alive=lambda: True)
+    viewer.object_queue = queue.Queue()
+    module = map3d_module(viewer)
+    frame = map3d_frame()
+    frame.video = Mock()
+    frame.video_config = CONFIG
+    frame.last_vehicle_pose = (*HOME, 0, 0, 0)
+
+    def apply_commands(*commands):
+        for command in commands:
+            module.cmd_map3d(command)
+        while not viewer.object_queue.empty():
+            msg = viewer.object_queue.get_nowait()
+            if msg[0] == 'video_fov':
+                frame.handle(msg)
+
+    frame.send_video()
+    assert frame.video.send.call_args.args[1] == 90
+    apply_commands(['set', 'videofovaxis', 'horizontal'],
+                   ['set', 'videofov', '90'])
+    frame.send_video()
+    assert frame.video.send.call_args.args[1] == pytest.approx(73.7397952917)
+    assert frame.fpv_fov == 90
+    apply_commands(['set', 'videofovaxis', 'vertical'],
+                   ['set', 'videofov', '75'])
+    frame.send_video()
+    assert frame.video.send.call_args.args[1] == 75
+    for bad in ('nan', 'inf', '0.5', '180', 'not-a-number'):
+        module.cmd_map3d(['set', 'videofov', bad])
+        assert module.map3d_settings.videofov == 75
+    assert capsys.readouterr().out
+    apply_commands(['set', 'videofov', '0'])
+    frame.fpv_fov = 65
+    frame.send_video()
+    assert frame.video.send.call_args.args[1] == 65
+
+
+def test_mount_and_fov_retained_when_map_restarted(map3d_module, monkeypatch):
+    from MAVProxy.modules import mavproxy_map3d
+    module = map3d_module()
+    module.send_fence = Mock()
+    module.send_rally = Mock()
+    module.send_cached_state = Mock()
+    module.send_kml = Mock()
+    module.cmd_map3d(['set', 'mountyaw', '90'])
+    module.cmd_map3d(['set', 'videofovaxis', 'horizontal'])
+    module.cmd_map3d(['set', 'videofov', '90'])
+    viewer = Mock()
+    viewer.is_alive.return_value = True
+    monkeypatch.setattr(mavproxy_map3d, 'missing_packages', lambda: [])
+    monkeypatch.setattr(mavproxy_map3d, 'resolve_tile_service',
+                        lambda service: (service, None))
+    monkeypatch.setattr(mavproxy_map3d, 'Map3D', Mock(return_value=viewer))
+    module.start_map()
+    viewer.set_camera_mount.assert_called_once_with(0, 0, 90)
+    viewer.set_video_fov.assert_called_once_with(90, 'horizontal')
+    viewer.set_camera_mount.reset_mock()
+    viewer.set_video_fov.reset_mock()
+    module.cmd_map3d(['set', 'showlabels', 'true'])
+    viewer.set_camera_mount.assert_not_called()
+    viewer.set_video_fov.assert_not_called()
+
+
+def test_live_horizontal_video_fov_reaches_vtk(backend, monkeypatch, map3d_frame):
+    if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+        pytest.skip('VTK offscreen test needs an X display on older VTK builds')
+    monkeypatch.setattr(video.time, 'monotonic', lambda: 10.0)
+    output = video.VideoOutput()
+    try:
+        output.open(CONFIG, None, *HOME[:2], 1.0)
+        frame = map3d_frame()
+        frame.video = output
+        frame.video_config = CONFIG
+        frame.last_vehicle_pose = (*HOME, 0, 0, 0)
+        frame.handle(('video_fov', 90, 'horizontal'))
+        frame.send_video()
+        assert output.tc.cam.GetViewAngle() == pytest.approx(73.7397952917)
+        assert output.camera.frames[0].shape == (48, 64, 3)
+    finally:
+        output.close()
+
+
+def test_unsupported_derived_vertical_fov_reports_error(map3d_frame):
+    events = []
+    frame = map3d_frame(events=events)
+    frame.video = Mock()
+    frame.video_config = ('/dev/video10', 16, 2160, 20, 'down')
+    frame.last_vehicle_pose = (*HOME, 0, 0, 0)
+    frame.handle(('video_fov', 179, 'horizontal'))
+    frame.send_video()
+    assert frame.video is None
+    assert any(event[0] == 'video_error' and '179 degree limit' in event[1]
+               for event in events)
+
+
+@pytest.mark.parametrize('view', ['down', 'fpv'])
+def test_video_uses_mount_rotation(backend, monkeypatch, view):
+    if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+        pytest.skip('VTK offscreen test needs an X display on older VTK builds')
+    monkeypatch.setattr(video.time, 'monotonic', lambda: 10.0)
+    output = video.VideoOutput()
+    try:
+        output.open(CONFIG[:-1] + (view,), None, *HOME[:2], 1.0)
+        pose = (*HOME, 0.4, -0.3, 1.2)
+        mount = (0.2, -0.4, math.pi / 2)
+        output.send(pose, 65, (1.25, True, False), mount)
+        expected = vtk.vtkCamera()
+        tc = TerrainCamera(expected, (0, 0, 0), 100)
+        if view == 'down':
+            tc.set_down((0, 0, HOME[2]), *pose[3:], mount=mount)
+        else:
+            tc.set_fpv((0, 0, HOME[2]), pose[5], pose[4], roll=pose[3],
+                       mount=mount)
+        assert output.tc.cam.GetViewUp() == pytest.approx(expected.GetViewUp())
+        assert output.tc.cam.GetDirectionOfProjection() == pytest.approx(
+            expected.GetDirectionOfProjection())
+    finally:
+        output.close()
 
 
 def test_failed_device_open_can_be_cleaned_up(backend):

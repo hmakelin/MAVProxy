@@ -63,24 +63,40 @@ class TerrainCamera:
             self.pitch = pitch
         self.apply()
 
-    def set_fpv(self, position, yaw, pitch, lookahead=5000.0, roll=0.0):
+    def set_fpv(self, position, yaw, pitch, lookahead=5000.0, roll=0.0,
+                mount=(0.0, 0.0, 0.0)):
         '''Body-forward camera; MAVLink attitude angles are in radians.'''
-        self._set_body_view(position, roll, pitch, yaw, False, lookahead)
+        self._set_body_view(position, roll, pitch, yaw, False, lookahead, mount)
 
-    def set_down(self, position, roll, pitch, yaw, lookahead=5000.0):
+    def set_down(self, position, roll, pitch, yaw, lookahead=5000.0,
+                 mount=(0.0, 0.0, 0.0)):
         '''Body-down camera, with the nose at the top of the image.'''
-        self._set_body_view(position, roll, pitch, yaw, True, lookahead)
+        self._set_body_view(position, roll, pitch, yaw, True, lookahead, mount)
 
-    def _set_body_view(self, position, roll, pitch, yaw, down, lookahead):
+    def _set_body_view(self, position, roll, pitch, yaw, down, lookahead, mount):
         sr, cr = math.sin(roll), math.cos(roll)
         sp, cp = math.sin(pitch), math.cos(pitch)
         sy, cy = math.sin(yaw), math.cos(yaw)
         # Body FRD -> NED (Rz(yaw) Ry(pitch) Rx(roll)) -> scene ENU.
         forward = (sy * cp, cy * cp, sp)
+        right = (cy * cr + sy * sp * sr,
+                 -sy * cr + cy * sp * sr, -cp * sr)
         body_down = (sy * sp * cr - cy * sr,
                      cy * sp * cr + sy * sr, -cp * cr)
-        direction = body_down if down else forward
-        up = forward if down else tuple(-v for v in body_down)
+        mr, mp, my = mount
+        msr, mcr = math.sin(mr), math.cos(mr)
+        msp, mcp = math.sin(mp), math.cos(mp)
+        msy, mcy = math.sin(my), math.cos(my)
+        mount_forward = (mcy * mcp, msy * mcp, -msp)
+        mount_down = (mcy * msp * mcr + msy * msr,
+                      msy * msp * mcr - mcy * msr, mcp * mcr)
+
+        def to_world(vector):
+            return tuple(vector[0] * forward[i] + vector[1] * right[i] +
+                         vector[2] * body_down[i] for i in range(3))
+
+        direction = to_world(mount_down if down else mount_forward)
+        up = to_world(mount_forward if down else tuple(-v for v in mount_down))
         self.pos = tuple(position)
         self.focal = [position[i] + lookahead * direction[i] for i in range(3)]
         self.dist = lookahead

@@ -113,6 +113,9 @@ def map3d_frame(monkeypatch):
         frame.down_enabled = False
         frame.video = None
         frame.video_config = None
+        frame.camera_mount = (0.0, 0.0, 0.0)
+        frame.video_fov = 0.0
+        frame.video_fov_axis = 'vertical'
         frame.last_vehicle = None
         frame.last_vehicle_pose = None
         frame.fpv_fov = 90.0

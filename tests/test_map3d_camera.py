@@ -62,6 +62,66 @@ def test_down_view_combined_attitude(attitude):
     assert np.dot(direction, up) == pytest.approx(0, abs=1e-12)
 
 
+def rotation_matrix(angles):
+    roll, pitch, yaw = map(math.radians, angles)
+    sr, cr = math.sin(roll), math.cos(roll)
+    sp, cp = math.sin(pitch), math.cos(pitch)
+    sy, cy = math.sin(yaw), math.cos(yaw)
+    rx = np.array(((1, 0, 0), (0, cr, -sr), (0, sr, cr)))
+    ry = np.array(((cp, 0, sp), (0, 1, 0), (-sp, 0, cp)))
+    rz = np.array(((cy, -sy, 0), (sy, cy, 0), (0, 0, 1)))
+    return rz @ ry @ rx
+
+
+@pytest.mark.parametrize('view', ['down', 'fpv'])
+@pytest.mark.parametrize('attitude,mount', [
+    ((0, 0, 0), (0, 0, 90)),
+    ((20, -35, 127), (0, 0, 90)),
+    ((-62, 33, -120), (17, -48, 73)),
+    ((30, 90, 75), (-25, 45, -140)),
+])
+def test_mount_rotation_composes_in_body_frame(view, attitude, mount):
+    rotation = (np.array(((0, 1, 0), (1, 0, 0), (0, 0, -1))) @
+                rotation_matrix(attitude) @ rotation_matrix(mount))
+    expected_direction = rotation @ ((0, 0, 1) if view == 'down' else (1, 0, 0))
+    expected_up = rotation @ ((1, 0, 0) if view == 'down' else (0, 0, -1))
+    camera = vtk.vtkCamera()
+    tc = TerrainCamera(camera, (0, 0, 0), 100)
+    roll, pitch, yaw = map(math.radians, attitude)
+    offsets = tuple(map(math.radians, mount))
+    if view == 'down':
+        tc.set_down((10, 20, 120), roll, pitch, yaw, mount=offsets)
+    else:
+        tc.set_fpv((10, 20, 120), yaw, pitch, roll=roll, mount=offsets)
+    assert camera.GetDirectionOfProjection() == pytest.approx(expected_direction)
+    assert camera.GetViewUp() == pytest.approx(expected_up)
+
+
+def test_sideways_down_mount_puts_forward_on_image_left():
+    camera = vtk.vtkCamera()
+    tc = TerrainCamera(camera, (0, 0, 0), 100)
+    tc.set_down((0, 0, 100), 0, 0, 0, mount=(0, 0, math.pi / 2))
+    assert camera.GetDirectionOfProjection() == pytest.approx((0, 0, -1))
+    assert camera.GetViewUp() == pytest.approx((1, 0, 0))
+    assert np.cross(camera.GetDirectionOfProjection(),
+                    camera.GetViewUp()) == pytest.approx((0, -1, 0))
+
+
+@pytest.mark.parametrize('before_scene', [False, True])
+def test_mount_command_updates_down_view(map3d_frame, before_scene):
+    frame = map3d_frame()
+    if not before_scene:
+        frame.init_scene(*HOME)
+    frame.handle(('camera_mount', 0, 0, 90))
+    if before_scene:
+        frame.init_scene(*HOME)
+    frame.handle(('vehicle', *HOME, 0, 0, 0))
+    frame.set_fpv_enabled(True, down=True)
+    assert frame.ren.GetActiveCamera().GetViewUp() == pytest.approx((1, 0, 0))
+    frame.handle(('camera_mount', 0, 0, -90))
+    assert frame.ren.GetActiveCamera().GetViewUp() == pytest.approx((-1, 0, 0))
+
+
 def scene(map3d_frame):
     frame = map3d_frame()
     frame.init_scene(*HOME)

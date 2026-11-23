@@ -231,6 +231,14 @@ class Map3D:
     def set_fpv_fov(self, fov):
         self._put(('fpvfov', float(fov)))
 
+    def set_camera_mount(self, roll, pitch, yaw):
+        '''Body-frame mount rotation in degrees.'''
+        self._put(('camera_mount', float(roll), float(pitch), float(yaw)))
+
+    def set_video_fov(self, fov, axis):
+        '''Video FOV in degrees, or zero to use the interactive vertical FOV.'''
+        self._put(('video_fov', float(fov), axis))
+
     def set_view(self, view):
         '''map, fpv (body-forward), or down (body-down).'''
         if view not in ('map', 'fpv', 'down'):

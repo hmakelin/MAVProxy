@@ -18,6 +18,62 @@ Returning to the map restores its previous camera and field of view.
 `map3d set fpvfov 90` sets the vertical field of view of both mounted views
 and video output.
 
+## Video field of view
+
+The virtual camera uses a centered, undistorted pinhole projection with square
+pixels. `videowidth` and `videoheight` set its resolution and aspect ratio.
+By default (`videofov 0`), video uses the vertical `fpvfov`, as do the
+interactive mounted views. To specify a horizontal field of view instead:
+
+```
+map3d set videowidth 640
+map3d set videoheight 480
+map3d set videofovaxis horizontal
+map3d set videofov 90
+```
+
+For 640 by 480, this gives a vertical FOV of about 73.74 degrees and
+`fx = fy = 320` pixels. With `videofovaxis vertical`, `videofov` instead
+specifies the vertical angle. Nonzero angles must be between 1 and 179
+degrees. The other angle is derived from the active video aspect ratio:
+`tan(hfov/2) = (width/height) * tan(vfov/2)`. FOV changes apply live without
+affecting the interactive view. Restart video after changing its dimensions;
+the FOV calculation uses the dimensions of the running video. Set `videofov`
+back to 0 to follow `fpvfov` again. If a horizontal FOV and aspect ratio
+would require a vertical FOV over VTK's 179-degree limit, video stops with an
+error rather than silently rendering a different FOV.
+
+Configure downstream camera intrinsics to match the chosen field of view and
+resolution; this setting does not configure Bronzeback automatically.
+
+## Camera mount orientation
+
+The mounted FPV and Down views, including virtual video, accept a fixed
+body-frame orientation offset in degrees:
+
+```
+map3d set mountroll 0
+map3d set mountpitch 0
+map3d set mountyaw 90
+```
+
+Angles default to zero and range from -180 to 180 degrees. They use the
+aircraft's forward-right-down axes and the rotation `Rz(yaw) Ry(pitch)
+Rx(roll)`, applied to the nominal camera axes before the aircraft attitude.
+Positive yaw rotates the nominal body-forward axis toward body-right. For a
+downward camera, `mountyaw 90` keeps the optical axis pointing down and puts
+body-right at the top and body-forward at the left of the image. With landscape
+video this puts the wider horizontal field of view along the aircraft's
+forward/back axis. Negative 90 puts body-forward at the right.
+
+The offset applies live to both interactive mounted views and virtual video,
+but not the ordinary map or vehicle telemetry. Set it before or after starting
+video; it is retained if the map is stopped and restarted. A downstream
+consumer such as `bronzebacknadir` must be configured with the matching
+camera-to-body rotation and calibrated intrinsics. For its existing Map3D
+convention, a downward camera with `mountyaw 90` changes the required yaw
+from 90 to 180 degrees.
+
 ## SITL ground-truth position
 
 Map3d normally follows the autopilot's estimated position and attitude.
@@ -132,8 +188,9 @@ resizing the interactive map does not move or resize the video camera.
 Both video views follow full vehicle attitude. Use `zexag=1` for realistic
 geometry.
 
-Video settings are applied when `map3d video start` is issued; issue it again
-after changing them. `fpvfov` and terrain brightness/shading/wireframe changes
+Video device, resolution, frame rate and view are applied when `map3d video
+start` is issued; issue it again after changing them. Video FOV, mount
+orientation, `fpvfov` and terrain brightness/shading/wireframe changes
 apply live. Frames begin once the viewer has a vehicle position; terrain and
 imagery load asynchronously and may initially be incomplete. The frame rate is
 a target, limited by terrain loading and rendering speed; telemetry is not

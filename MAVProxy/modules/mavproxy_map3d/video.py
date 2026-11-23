@@ -50,7 +50,7 @@ class VideoOutput:
         self.capture.ReadFrontBufferOff()
         self.capture.ShouldRerenderOff()
 
-    def send(self, pose, fov, render_settings):
+    def send(self, pose, fov, render_settings, mount=(0.0, 0.0, 0.0)):
         now = time.monotonic()
         if now < self.next_frame:
             return
@@ -60,9 +60,9 @@ class VideoOutput:
         position = enu(lat, lon, amsl * self.zexag,
                        self.terrain.lat0, self.terrain.lon0)
         if self.view == 'down':
-            self.tc.set_down(position, roll, pitch, yaw)
+            self.tc.set_down(position, roll, pitch, yaw, mount=mount)
         else:
-            self.tc.set_fpv(position, yaw, pitch, roll=roll)
+            self.tc.set_fpv(position, yaw, pitch, roll=roll, mount=mount)
         self.tc.cam.SetViewAngle(fov)
         if render_settings != self.render_settings:
             self.terrain.set_render_settings(*render_settings)

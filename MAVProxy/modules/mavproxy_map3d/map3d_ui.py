@@ -107,6 +107,9 @@ class Map3DFrame(wx.Frame):
         self.down_enabled = False
         self.video = None
         self.video_config = None
+        self.camera_mount = (0.0, 0.0, 0.0)
+        self.video_fov = 0.0
+        self.video_fov_axis = 'vertical'
         self.fpv_fov = min(150.0, max(20.0, float(state.fpvfov)))
         # how the mission is drawn, as the element manager's own defaults.
         # The parent pushes what it wants, which may be before there is a
@@ -451,9 +454,11 @@ class Map3DFrame(wx.Frame):
             return
         (_, _, _, roll, pitch, yaw) = self.last_vehicle_pose
         if self.down_enabled:
-            self.tc.set_down(vehicle_enu, roll, pitch, yaw)
+            self.tc.set_down(vehicle_enu, roll, pitch, yaw,
+                             mount=self.camera_mount)
         else:
-            self.tc.set_fpv(vehicle_enu, yaw, pitch, roll=roll)
+            self.tc.set_fpv(vehicle_enu, yaw, pitch, roll=roll,
+                            mount=self.camera_mount)
         self.ren.GetActiveCamera().SetViewAngle(self.fpv_fov)
         self.terrain.update(self.tc)
         self.render()
@@ -509,10 +514,19 @@ class Map3DFrame(wx.Frame):
         if self.video is None or self.last_vehicle_pose is None:
             return
         try:
+            fov = self.video_fov or self.fpv_fov
+            if self.video_fov and self.video_fov_axis == 'horizontal':
+                width, height = self.video_config[1:3]
+                fov = math.degrees(2 * math.atan(
+                    math.tan(math.radians(fov) / 2) * height / width))
+                if fov > 179:
+                    raise ValueError(
+                        "horizontal video FOV and aspect ratio require a "
+                        "vertical FOV above VTK's 179 degree limit")
             self.video.send(
-                self.last_vehicle_pose, self.fpv_fov,
+                self.last_vehicle_pose, fov,
                 (self.terrain_brightness, self.terrain_shading,
-                 self.terrain_wireframe))
+                 self.terrain_wireframe), self.camera_mount)
         except (RuntimeError, OSError, ValueError) as ex:
             self.video_error(ex)
 
@@ -535,6 +549,14 @@ class Map3DFrame(wx.Frame):
             return
         if kind == 'fpvfov':
             self.set_fpv_fov(msg[1])
+            return
+        if kind == 'camera_mount':
+            self.camera_mount = tuple(math.radians(v) for v in msg[1:])
+            if self.fpv_enabled:
+                self.update_fpv_camera()
+            return
+        if kind == 'video_fov':
+            self.video_fov, self.video_fov_axis = msg[1:]
             return
         if kind == 'follow':
             self.set_follow_enabled(msg[1])

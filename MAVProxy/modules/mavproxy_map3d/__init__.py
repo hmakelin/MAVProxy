@@ -80,6 +80,12 @@ def make_settings():
         mp_settings.MPSetting('videoheight', int, 480, range=(16, 2160)),
         mp_settings.MPSetting('videofps', float, 20.0, range=(1.0, 60.0)),
         mp_settings.MPSetting('videoview', str, 'down', choice=('down', 'fpv')),
+        mp_settings.MPSetting('videofov', float, 0.0, range=(0.0, 179.0)),
+        mp_settings.MPSetting('videofovaxis', str, 'vertical',
+                              choice=('horizontal', 'vertical')),
+        mp_settings.MPSetting('mountroll', float, 0.0, range=(-180.0, 180.0)),
+        mp_settings.MPSetting('mountpitch', float, 0.0, range=(-180.0, 180.0)),
+        mp_settings.MPSetting('mountyaw', float, 0.0, range=(-180.0, 180.0)),
         mp_settings.MPSetting('positionsource', str, 'estimate',
                               choice=('estimate', 'sitl')),
         mp_settings.MPSetting('ribbonwidth', float, RIBBON_WIDTH,
@@ -170,6 +176,21 @@ class Map3DModule(mp_module.MPModule):
         elif cmd == "video":
             self.cmd_video(args[1:])
         elif cmd == "set":
+            mount_names = ('mountroll', 'mountpitch', 'mountyaw')
+            if len(args) > 2 and args[1] in (*mount_names, 'videofov'):
+                try:
+                    value = float(args[2])
+                except ValueError:
+                    value = float('nan')
+                if not math.isfinite(value):
+                    print("map3d: %s must be a finite number" % args[1])
+                    return
+                if args[1] == 'videofov' and 0 < value < 1:
+                    print("map3d: videofov must be 0 or between 1 and 179 degrees")
+                    return
+            previous_mount = tuple(self.map3d_settings.get(n) for n in mount_names)
+            previous_video_fov = (self.map3d_settings.videofov,
+                                  self.map3d_settings.videofovaxis)
             previous_source = self.map3d_settings.positionsource
             self.map3d_settings.command(args[1:])
             if self.map3d_settings.positionsource != previous_source:
@@ -185,6 +206,13 @@ class Map3DModule(mp_module.MPModule):
                     self.map3d_settings.missionpath == 'flown'):
                 self.flown_asked = True
             if self.map is not None and self.map.is_alive():
+                mount = tuple(self.map3d_settings.get(n) for n in mount_names)
+                if mount != previous_mount:
+                    self.map.set_camera_mount(*mount)
+                video_fov = (self.map3d_settings.videofov,
+                             self.map3d_settings.videofovaxis)
+                if video_fov != previous_video_fov:
+                    self.map.set_video_fov(*video_fov)
                 self.map.set_mission_arrows(self.map3d_settings.showdirection)
                 self.map.set_mission_labels(self.map3d_settings.showlabels)
                 self.map.set_mission_label_size(self.map3d_settings.labelsize)
@@ -249,6 +277,11 @@ class Map3DModule(mp_module.MPModule):
         self.map.set_trail_length(self.map3d_settings.traillength)
         self.map.set_trail_ribbon(self.map3d_settings.trailribbon,
                                   self.map3d_settings.ribbonwidth)
+        self.map.set_camera_mount(self.map3d_settings.mountroll,
+                                  self.map3d_settings.mountpitch,
+                                  self.map3d_settings.mountyaw)
+        self.map.set_video_fov(self.map3d_settings.videofov,
+                               self.map3d_settings.videofovaxis)
         self.send_mission()
         self.send_fence()
         self.send_rally()
