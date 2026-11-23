@@ -18,6 +18,25 @@ Returning to the map restores its previous camera and field of view.
 `map3d set fpvfov 90` sets the vertical field of view of both mounted views
 and video output.
 
+## SITL ground-truth position
+
+Map3d normally follows the autopilot's estimated position and attitude.
+For ArduPilot SITL, use the simulator's actual position, altitude and attitude
+for both the map and video camera instead:
+
+```
+map3d set positionsource sitl
+```
+
+Map3d requests `SIM_STATE` at 10 Hz. MAVLink 2 is required for its precise
+latitude and longitude fields. If the simulator state stops arriving, Map3d
+warns and retries the request; it does not silently switch to the estimated
+position. The last rendered pose remains visible until fresh truth arrives.
+This only changes the rendering source: it does not send ground truth to the
+autopilot, change the EKF, or replace its navigation telemetry. Switch back
+with `map3d set positionsource estimate`. The default is `estimate`, including
+for real vehicles and log review.
+
 ## Custom imagery tiles
 
 Map3d can use a custom XYZ/Web Mercator imagery source. Set the tile URL in the

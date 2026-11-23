@@ -80,6 +80,8 @@ def make_settings():
         mp_settings.MPSetting('videoheight', int, 480, range=(16, 2160)),
         mp_settings.MPSetting('videofps', float, 20.0, range=(1.0, 60.0)),
         mp_settings.MPSetting('videoview', str, 'down', choice=('down', 'fpv')),
+        mp_settings.MPSetting('positionsource', str, 'estimate',
+                              choice=('estimate', 'sitl')),
         mp_settings.MPSetting('ribbonwidth', float, RIBBON_WIDTH,
                               label='Ribbon width (m)', range=(0.1, 1000.0)),
     ])
@@ -111,6 +113,9 @@ class Map3DModule(mp_module.MPModule):
         self.last_vehicle_send = 0
         self.last_global_position = 0
         self.last_attitude = (0.0, 0.0, 0.0)
+        self.last_sim_state = 0.0
+        self.last_sim_request = 0.0
+        self.last_sim_warning = 0.0
         self.home_amsl = None
         self.home_position = None
         # whether the vehicle is armed, and the way it last pointed while it
@@ -165,7 +170,17 @@ class Map3DModule(mp_module.MPModule):
         elif cmd == "video":
             self.cmd_video(args[1:])
         elif cmd == "set":
+            previous_source = self.map3d_settings.positionsource
             self.map3d_settings.command(args[1:])
+            if self.map3d_settings.positionsource != previous_source:
+                self.last_vehicle_send = 0
+                self.last_sim_state = 0.0
+                self.last_sim_request = 0.0
+                self.last_sim_warning = 0.0
+                if self.map3d_settings.positionsource == 'sitl':
+                    print("map3d: using SITL truth; waiting for SIM_STATE")
+                elif self.map is not None and self.map.is_alive():
+                    self.send_cached_state()
             if (len(args) > 1 and args[1] == 'missionpath' and
                     self.map3d_settings.missionpath == 'flown'):
                 self.flown_asked = True
@@ -291,9 +306,11 @@ class Map3DModule(mp_module.MPModule):
                                    home.longitude * 1.0e-7)
 
         # Prefer the estimator position, then DataFlash POS, then raw GPS.
-        position = (messages.get('GLOBAL_POSITION_INT') or
-                    messages.get('POS') or
-                    messages.get('GPS_RAW_INT'))
+        position = None
+        if self.map3d_settings.positionsource == 'estimate':
+            position = (messages.get('GLOBAL_POSITION_INT') or
+                        messages.get('POS') or
+                        messages.get('GPS_RAW_INT'))
         if position is not None:
             self.mavlink_packet(position, force=True)
 
@@ -910,6 +927,8 @@ class Map3DModule(mp_module.MPModule):
         if not alive:
             self.map = None
             return
+        if self.map3d_settings.positionsource == 'sitl':
+            self.request_sim_state()
         kml_mod = self.module('kmlread')
         if self._kml_state(kml_mod) != self.kml_change_state:
             self.send_kml(kml_mod)
@@ -954,6 +973,24 @@ class Map3DModule(mp_module.MPModule):
             self.send_mission()
         self.redraw_for_ground_heading()
         self.draw_flown_track()
+
+    def request_sim_state(self):
+        now = time.monotonic()
+        if self.last_sim_state and now - self.last_sim_state < 5:
+            return
+        if not self.last_sim_warning or now - self.last_sim_warning >= 10:
+            print("map3d: waiting for SITL SIM_STATE with MAVLink 2 position")
+            self.last_sim_warning = now
+        if self.last_sim_request and now - self.last_sim_request < 5:
+            return
+        master = self.master
+        if master is None:
+            return
+        master.mav.command_long_send(
+            self.settings.target_system, self.settings.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            mavutil.mavlink.MAVLINK_MSG_ID_SIM_STATE, 100000, 0, 0, 0, 0, 0)
+        self.last_sim_request = now
 
     def redraw_for_ground_heading(self, now=None):
         '''fly the mission again from the way the vehicle points now, if that
@@ -1035,14 +1072,31 @@ class Map3DModule(mp_module.MPModule):
             # ArduPilot DataFlash attitude is recorded in degrees.
             self.last_attitude = tuple(math.radians(v) for v in
                                        (m.Roll, m.Pitch, m.Yaw))
+        elif mtype == 'SIM_STATE' and self.map3d_settings.positionsource == 'sitl':
+            if not self.message_is_from_primary_vehicle(m):
+                return
+            lat = getattr(m, 'lat_int', 0) * 1.0e-7
+            lon = getattr(m, 'lon_int', 0) * 1.0e-7
+            attitude = (m.roll, m.pitch, m.yaw)
+            if ((lat == 0 and lon == 0) or not -90 <= lat <= 90 or
+                    not -180 <= lon <= 180 or
+                    not all(math.isfinite(v) for v in (m.alt, *attitude))):
+                return
+            self.last_sim_state = time.monotonic()
+            self.send_vehicle_position(lat, lon, m.alt, attitude=attitude,
+                                       force=force)
         elif mtype == 'GLOBAL_POSITION_INT':
             self.last_global_position = time.time()
+            if self.map3d_settings.positionsource != 'estimate':
+                return
             lat = m.lat * 1.0e-7
             lon = m.lon * 1.0e-7
             alt = m.alt * 1.0e-3            # AMSL (mm -> m)
             rel = m.relative_alt * 1.0e-3   # above home
             self.send_vehicle_position(lat, lon, alt, alt - rel, force=force)
         elif mtype == 'POS':
+            if self.map3d_settings.positionsource != 'estimate':
+                return
             # DataFlash log playback does not contain GLOBAL_POSITION_INT.
             if not force and time.time() - self.last_global_position < 1.0:
                 return
@@ -1050,6 +1104,8 @@ class Map3DModule(mp_module.MPModule):
             self.send_vehicle_position(m.Lat, m.Lng, m.Alt, m.Alt - rel,
                                        force=force)
         elif mtype == 'GPS_RAW_INT':
+            if self.map3d_settings.positionsource != 'estimate':
+                return
             # Raw GPS is a live fallback until estimator position is available.
             if not force and time.time() - self.last_global_position < 1.0:
                 return
